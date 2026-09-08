@@ -127,7 +127,87 @@ app.put('/api/v1/clients/:id', (req, res) => {
 
   /* ---------- Update code below ----------*/
 
+  // Validate status if provided
+  if (status !== undefined && status !== 'backlog' && status !== 'in-progress' && status !== 'complete') {
+    return res.status(400).send({
+      message: 'Invalid status provided.',
+      long_message: 'Status can only be one of the following: [backlog | in-progress | complete].',
+    });
+  }
 
+  // Validate priority if provided
+  if (priority !== undefined) {
+    priority = parseInt(priority, 10);
+    if (Number.isNaN(priority) || priority < 1) {
+      return res.status(400).send({
+        message: 'Invalid priority provided.',
+        long_message: 'Priority can only be a positive integer.',
+      });
+    }
+  }
+
+  const oldStatus = client.status;
+  const oldPriority = client.priority;
+
+  // Nothing to do
+  if (status === undefined && priority === undefined) {
+    return res.status(200).send(clients);
+  }
+
+  const newStatus = status !== undefined ? status : oldStatus;
+  const isNewLane = newStatus !== oldStatus;
+
+  // Same lane, no explicit priority → no-op
+  if (!isNewLane && priority === undefined) {
+    return res.status(200).send(clients);
+  }
+
+  // Same lane, same priority → no-op
+  if (!isNewLane && priority === oldPriority) {
+    return res.status(200).send(clients);
+  }
+
+  // Step 1: Remove from old lane, shift down everyone below
+  for (const c of clients) {
+    if (c.id !== id && c.status === oldStatus && c.priority > oldPriority) {
+      c.priority -= 1;
+    }
+  }
+
+  // Step 2: Determine insertion point in target lane
+  let insertAt;
+  if (priority !== undefined) {
+    insertAt = priority;
+  } else {
+    const maxPrio = Math.max(0, ...clients.filter(c => c.status === newStatus && c.id !== id).map(c => c.priority));
+    insertAt = maxPrio + 1;
+  }
+
+  // Clamp to valid range
+  const targetLaneSize = clients.filter(c => c.status === newStatus && c.id !== id).length;
+  if (insertAt > targetLaneSize + 1) {
+    insertAt = targetLaneSize + 1;
+  }
+
+  // Shift up everyone at or below insertAt in target lane
+  for (const c of clients) {
+    if (c.id !== id && c.status === newStatus && c.priority >= insertAt) {
+      c.priority += 1;
+    }
+  }
+
+  // Place the client
+  client.status = newStatus;
+  client.priority = insertAt;
+
+  // Step 3: Persist all changes
+  const updateStmt = db.prepare('UPDATE clients SET status = ?, priority = ? WHERE id = ?');
+  const transaction = db.transaction(() => {
+    for (const c of clients) {
+      updateStmt.run(c.status, c.priority, c.id);
+    }
+  });
+  transaction();
 
   return res.status(200).send(clients);
 });
